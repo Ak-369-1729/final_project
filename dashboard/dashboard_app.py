@@ -105,24 +105,16 @@ refresh = st.sidebar.slider(
 # WAIT FOR LIVE DETECTION
 # =========================================================
 
-if not os.path.exists(
-    STATUS_PATH
-):
+if not os.path.exists(STATUS_PATH):
 
-    st.warning(
-        "Live detection is starting..."
-    )
+    st.warning("Live detection has not generated node status yet.")
 
     st.info(
-        "Please wait a few seconds while "
-        "the cybersecurity detection engine "
-        "generates the initial node status."
+        "The dashboard is running, but the live detection engine "
+        "has not produced logs/live_node_status.csv."
     )
 
-    time.sleep(2)
-
-    st.rerun()
-
+    st.stop()
 
 # =========================================================
 # LOAD NODE STATUS
