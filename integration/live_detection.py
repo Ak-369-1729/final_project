@@ -4,28 +4,31 @@ import time
 import random
 import warnings
 import joblib
+
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
 
 # =========================================================
-# PROJECT ROOT PATH
+# PROJECT ROOT
 # =========================================================
-sys.path.append(
-    os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..")
-    )
+
+BASE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
 )
+
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 # =========================================================
 # IMPORTS
 # =========================================================
+
 from anomaly_detection.dynamic_iforest import DynamicIsolationForest
 
 from node_isolation.isolation_engine import (
     isolate_node,
-    restore_node,
     save_isolated_nodes,
     get_isolated_nodes
 )
@@ -34,6 +37,9 @@ from digital_twin.network_topology import (
     create_network,
     draw_network
 )
+
+from sklearn.preprocessing import LabelEncoder
+
 from sklearn.metrics import (
     confusion_matrix,
     ConfusionMatrixDisplay,
@@ -46,74 +52,122 @@ from sklearn.metrics import (
     auc
 )
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
+
+
 # =========================================================
 # PATHS
 # =========================================================
-DATA_PATH = "datasets/UNSW_NB15_testing-set.parquet"
 
-MODEL_PATH = "saved_models/UNSW_NB15/iforest_unsw.pkl"
+DATA_PATH = os.path.join(
+    BASE_DIR,
+    "datasets",
+    "UNSW_NB15_testing-set.parquet"
+)
 
-SCALER_PATH = "saved_models/UNSW_NB15/scaler_unsw.pkl"
+LOG_DIR = os.path.join(
+    BASE_DIR,
+    "logs"
+)
 
-ENCODER_PATH = "saved_models/UNSW_NB15/encoders.pkl"
+OUTPUT_PATH = os.path.join(
+    LOG_DIR,
+    "live_node_status.csv"
+)
 
-FEATURE_PATH = "saved_models/UNSW_NB15/feature_columns.json"
+ATTACK_LOG_PATH = os.path.join(
+    LOG_DIR,
+    "live_attack_log.csv"
+)
 
-OUTPUT_PATH = "logs/live_node_status.csv"
-
-ATTACK_LOG_PATH = "logs/live_attack_log.csv"
+ISOLATED_PATH = os.path.join(
+    LOG_DIR,
+    "isolated_nodes.csv"
+)
 
 # =========================================================
-# SLIDING WINDOW CONFIG
+# MODEL PATHS
 # =========================================================
+
+# Preferred paths from the original project.
+MODEL_CANDIDATES = [
+    os.path.join(
+        BASE_DIR,
+        "models",
+        "unsw_model.pkl"
+    ),
+    os.path.join(
+        BASE_DIR,
+        "saved_models",
+        "UNSW_NB15",
+        "iforest_unsw.pkl"
+    )
+]
+
+SCALER_CANDIDATES = [
+    os.path.join(
+        BASE_DIR,
+        "scalers",
+        "unsw_scaler.pkl"
+    ),
+    os.path.join(
+        BASE_DIR,
+        "saved_models",
+        "UNSW_NB15",
+        "scaler_unsw.pkl"
+    )
+]
+
+
+def find_existing_path(candidates, name):
+    """
+    Return the first existing path from candidates.
+    """
+
+    for path in candidates:
+
+        if os.path.exists(path):
+            return path
+
+    print("\nERROR: Could not find", name)
+
+    print("\nChecked:")
+
+    for path in candidates:
+        print(" -", path)
+
+    return None
+
+
+# =========================================================
+# CREATE REQUIRED DIRECTORIES
+# =========================================================
+
+os.makedirs(
+    LOG_DIR,
+    exist_ok=True
+)
+
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
 WINDOW_SIZE = 1000
 
 THRESHOLD_UPDATE_INTERVAL = 50
 
-# =========================================================
-# LOAD DATASET
-# =========================================================
-print("\nLoading UNSW-NB15 dataset...")
+SAMPLE_SIZE = 500
 
-df = pd.read_parquet(DATA_PATH)
-
-print(f"\nDataset Shape: {df.shape}")
-
-# Lightweight real-time simulation
-df = df.sample(500, random_state=42)
-
-
-# Labels
-y = df["label"]
-
-# Features
-X = df.drop(columns=["label", "attack_cat"])
-from sklearn.preprocessing import LabelEncoder
-
-for col in ["proto", "service", "state"]:
-    le = LabelEncoder()
-    X[col] = le.fit_transform(X[col].astype(str))
-
-print("Feature count:", len(X.columns))
-print(X.columns.tolist())
-
-
-# Fix feature mismatch
-
-
-X = X.values
-y = y.values
-
-
-# =========================================================
-# CREATE DIGITAL TWIN NETWORK
-# =========================================================
-G = create_network()
 
 # =========================================================
 # NODE DEFINITIONS
 # =========================================================
+
 nodes = [
     "Node_A",
     "Node_B",
@@ -122,9 +176,11 @@ nodes = [
     "Node_E"
 ]
 
+
 # =========================================================
-# NODE STATUS TRACKER
+# INITIAL NODE STATUS
 # =========================================================
+
 node_status = {
 
     node: {
@@ -142,197 +198,372 @@ node_status = {
     for node in nodes
 }
 
+
+# =========================================================
+# LOAD DATASET
+# =========================================================
+
+print("\n" + "=" * 70)
+print("NEXUS CYBER RESILIENCE")
+print("LIVE THREAT DETECTION")
+print("=" * 70)
+
+print("\nLoading dataset...")
+
+if not os.path.exists(DATA_PATH):
+
+    print("\nERROR: Dataset not found:")
+    print(DATA_PATH)
+
+    sys.exit(1)
+
+
+df = pd.read_parquet(
+    DATA_PATH
+)
+
+print(
+    f"Dataset Shape: {df.shape}"
+)
+
+
+# =========================================================
+# SAMPLE DATA FOR SIMULATION
+# =========================================================
+
+sample_size = min(
+    SAMPLE_SIZE,
+    len(df)
+)
+
+df = df.sample(
+    sample_size,
+    random_state=42
+).reset_index(
+    drop=True
+)
+
+
+# =========================================================
+# LABELS
+# =========================================================
+
+if "label" not in df.columns:
+
+    print(
+        "\nERROR: 'label' column not found."
+    )
+
+    sys.exit(1)
+
+
+y = df["label"].copy()
+
+
+# =========================================================
+# FEATURES
+# =========================================================
+
+drop_columns = [
+    "label",
+    "attack_cat"
+]
+
+existing_drop_columns = [
+    column
+    for column in drop_columns
+    if column in df.columns
+]
+
+X = df.drop(
+    columns=existing_drop_columns
+).copy()
+
+
+# =========================================================
+# ENCODE CATEGORICAL FEATURES
+# =========================================================
+
+for column in [
+    "proto",
+    "service",
+    "state"
+]:
+
+    if column in X.columns:
+
+        encoder = LabelEncoder()
+
+        X[column] = encoder.fit_transform(
+            X[column].astype(str)
+        )
+
+
+# =========================================================
+# CONVERT TO NUMPY
+# =========================================================
+
+X = X.values
+
+y = y.values
+
+
+print(
+    f"Samples processed: {len(X)}"
+)
+
+print(
+    f"Feature count: {X.shape[1]}"
+)
+
+
+# =========================================================
+# CREATE NETWORK
+# =========================================================
+
+try:
+
+    G = create_network()
+
+except Exception as e:
+
+    print(
+        "\nWarning: Network creation failed:"
+    )
+
+    print(e)
+
+    G = None
+
+
+# =========================================================
+# FIND MODEL
+# =========================================================
+
+MODEL_PATH = find_existing_path(
+    MODEL_CANDIDATES,
+    "UNSW model"
+)
+
+SCALER_PATH = find_existing_path(
+    SCALER_CANDIDATES,
+    "UNSW scaler"
+)
+
+
+if MODEL_PATH is None:
+
+    sys.exit(1)
+
+
+if SCALER_PATH is None:
+
+    sys.exit(1)
+
+
+print(
+    "\nLoading model:"
+)
+
+print(
+    MODEL_PATH
+)
+
+print(
+    "\nLoading scaler:"
+)
+
+print(
+    SCALER_PATH
+)
+
+
 # =========================================================
 # LOAD MODEL
 # =========================================================
 
-print("\nLoading trained model...")
+try:
 
-unsw_model = joblib.load(
-    "models/unsw_model.pkl"
+    unsw_model = joblib.load(
+        MODEL_PATH
+    )
+
+    unsw_scaler = joblib.load(
+        SCALER_PATH
+    )
+
+except Exception as e:
+
+    print(
+        "\nERROR while loading model/scaler:"
+    )
+
+    print(e)
+
+    sys.exit(1)
+
+
+print(
+    "\nModel loaded successfully."
 )
 
-unsw_scaler = joblib.load(
-    "scalers/unsw_scaler.pkl"
-)
 
-print("Model loaded successfully!")
+# =========================================================
+# SCALE DATA
+# =========================================================
 
-# =========================================
-# RUN DETECTION
-# =========================================
+try:
 
-# Calculate threshold ONCE
+    X_scaled = unsw_scaler.transform(
+        X
+    )
 
-all_scores = unsw_model.decision_function(
-    unsw_scaler.transform(X)
-)
+except Exception as e:
+
+    print(
+        "\nERROR: Feature mismatch between dataset and scaler."
+    )
+
+    print(e)
+
+    sys.exit(1)
+
+
+# =========================================================
+# CALCULATE GLOBAL THRESHOLD
+# =========================================================
+
+try:
+
+    all_scores = unsw_model.decision_function(
+        X_scaled
+    )
+
+except Exception as e:
+
+    print(
+        "\nERROR calculating anomaly scores:"
+    )
+
+    print(e)
+
+    sys.exit(1)
+
 
 dynamic_threshold = np.percentile(
     all_scores,
     10
 )
 
-print(f"\nGlobal Threshold = {dynamic_threshold:.4f}")
 
-# Process traffic
+print(
+    f"\nGlobal Threshold: "
+    f"{dynamic_threshold:.6f}"
+)
 
-for sample, label in zip(X, y):
 
-    node = random.choice(nodes)
+# =========================================================
+# DETECTION
+# =========================================================
 
-    
+y_pred = []
+
+scores = []
+
+
+for index, (sample, label) in enumerate(
+    zip(X, y)
+):
+
+    node = random.choice(
+        nodes
+    )
 
     sample_scaled = unsw_scaler.transform(
         [sample]
     )
 
-    score = unsw_model.decision_function(
-        sample_scaled
-    )[0]
+    score = float(
+        unsw_model.decision_function(
+            sample_scaled
+        )[0]
+    )
+
+    scores.append(
+        score
+    )
+
     if score < dynamic_threshold:
 
         risk = "HIGH"
 
-        pass
+        node_status[node][
+            "attacks_detected"
+        ] += 1
 
-        isolate_node(node)
+        try:
+
+            isolate_node(
+                node
+            )
+
+        except Exception as e:
+
+            print(
+                f"Warning: Could not isolate {node}: {e}"
+            )
 
     else:
 
         risk = "LOW"
 
+
+    # Store latest status
+
     node_status[node] = {
-        "risk": risk,
-        "anomaly_score": float(score)
+
+        "state":
+            "ISOLATED"
+            if risk == "HIGH"
+            else "ACTIVE",
+
+        "risk":
+            risk,
+
+        "anomaly_score":
+            score,
+
+        "attacks_detected":
+            node_status[node][
+                "attacks_detected"
+            ]
+
     }
 
-    # Update node status
-    node_status[node] = {
-        "risk": risk,
-        "anomaly_score": float(score)
-    }
 
-# =========================================
-# MODEL EVALUATION
-# =========================================
-
-y_pred = []
-scores = []
-
-for sample in X:
-
-    sample_scaled = unsw_scaler.transform(
-        [sample]
-    )
-
-    score = unsw_model.decision_function(
-        sample_scaled
-    )[0]
-
-    scores.append(score)
+    # Classification label
 
     if score < dynamic_threshold:
-        y_pred.append(1)
+
+        y_pred.append(
+            1
+        )
+
     else:
-        y_pred.append(0)
 
-print("\n" + "="*50)
-print("MODEL PERFORMANCE")
-print("="*50)
+        y_pred.append(
+            0
+        )
 
-accuracy = accuracy_score(y, y_pred)
-precision = precision_score(y, y_pred)
-recall = recall_score(y, y_pred)
-f1 = f1_score(y, y_pred)
 
-print(f"Accuracy  : {accuracy:.4f}")
-print(f"Precision : {precision:.4f}")
-print(f"Recall    : {recall:.4f}")
-print(f"F1 Score  : {f1:.4f}")
-
-print("\nClassification Report:\n")
-
-print(
-    classification_report(
-        y,
-        y_pred
-    )
-)
-
-# =========================================
-# CONFUSION MATRIX
-# =========================================
-
-cm = confusion_matrix(
-    y,
-    y_pred
-)
-
-disp = ConfusionMatrixDisplay(
-    confusion_matrix=cm
-)
-
-disp.plot()
-
-plt.title(
-    "UNSW-NB15 Confusion Matrix"
-)
-
-plt.show()
-
-# =========================================
-# ROC CURVE
-# =========================================
-
-fpr, tpr, _ = roc_curve(
-    y,
-    [-s for s in scores]
-)
-
-roc_auc = auc(
-    fpr,
-    tpr
-)
-
-print(
-    f"\nROC-AUC : {roc_auc:.4f}"
-)
-
-plt.figure()
-
-plt.plot(
-    fpr,
-    tpr,
-    label=f"AUC = {roc_auc:.4f}"
-)
-
-plt.plot(
-    [0, 1],
-    [0, 1],
-    "--"
-)
-
-plt.xlabel(
-    "False Positive Rate"
-)
-
-plt.ylabel(
-    "True Positive Rate"
-)
-
-plt.title(
-    "ROC Curve"
-)
-
-plt.legend()
-
-plt.show()
-# =========================================
+# =========================================================
 # SAVE NODE STATUS
-# =========================================
+# =========================================================
 
-status_df = pd.DataFrame(node_status).T
+status_df = pd.DataFrame(
+    node_status
+).T
+
 
 status_df.to_csv(
     OUTPUT_PATH,
@@ -340,23 +571,289 @@ status_df.to_csv(
 )
 
 
-# ---------------------------------------------------------
-# SAVE ISOLATED NODES
-# ---------------------------------------------------------
-save_isolated_nodes(
-    "logs/isolated_nodes.csv"
+print(
+    "\nNode status saved to:"
 )
+
+print(
+    OUTPUT_PATH
+)
+
+
+# =========================================================
+# SAVE ISOLATED NODES
+# =========================================================
+
+try:
+
+    save_isolated_nodes(
+        ISOLATED_PATH
+    )
+
+except Exception as e:
+
+    print(
+        "\nWarning: Could not save isolated nodes:"
+    )
+
+    print(e)
+
+
+# =========================================================
+# SAVE ATTACK LOG
+# =========================================================
+
+attack_rows = []
+
+for node in nodes:
+
+    node_info = node_status[node]
+
+    if node_info["risk"] == "HIGH":
+
+        attack_rows.append({
+
+            "node":
+                node,
+
+            "risk":
+                node_info["risk"],
+
+            "anomaly_score":
+                node_info["anomaly_score"],
+
+            "timestamp":
+                pd.Timestamp.now()
+
+        })
+
+
+attack_log_df = pd.DataFrame(
+    attack_rows
+)
+
+
+if attack_log_df.empty:
+
+    attack_log_df = pd.DataFrame(
+        columns=[
+            "node",
+            "risk",
+            "anomaly_score",
+            "timestamp"
+        ]
+    )
+
+
+attack_log_df.to_csv(
+    ATTACK_LOG_PATH,
+    index=False
+)
+
+
+# =========================================================
+# MODEL EVALUATION
+# =========================================================
+
+print(
+    "\n" + "=" * 60
+)
+
+print(
+    "MODEL PERFORMANCE"
+)
+
+print(
+    "=" * 60
+)
+
+
+try:
+
+    accuracy = accuracy_score(
+        y,
+        y_pred
+    )
+
+    precision = precision_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
+
+    recall = recall_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
+
+    f1 = f1_score(
+        y,
+        y_pred,
+        zero_division=0
+    )
+
+    print(
+        f"Accuracy  : {accuracy:.4f}"
+    )
+
+    print(
+        f"Precision : {precision:.4f}"
+    )
+
+    print(
+        f"Recall    : {recall:.4f}"
+    )
+
+    print(
+        f"F1 Score  : {f1:.4f}"
+    )
+
+    print(
+        "\nClassification Report:\n"
+    )
+
+    print(
+        classification_report(
+            y,
+            y_pred,
+            zero_division=0
+        )
+    )
+
+except Exception as e:
+
+    print(
+        "\nEvaluation warning:"
+    )
+
+    print(e)
+
+
+# =========================================================
+# CONFUSION MATRIX
+# =========================================================
+
+try:
+
+    cm = confusion_matrix(
+        y,
+        y_pred
+    )
+
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm
+    )
+
+    disp.plot()
+
+    plt.title(
+        "UNSW-NB15 Confusion Matrix"
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join(
+            LOG_DIR,
+            "confusion_matrix.png"
+        )
+    )
+
+    plt.close()
+
+except Exception as e:
+
+    print(
+        "\nConfusion matrix warning:"
+    )
+
+    print(e)
+
+
+# =========================================================
+# ROC CURVE
+# =========================================================
+
+try:
+
+    fpr, tpr, _ = roc_curve(
+        y,
+        [-score for score in scores]
+    )
+
+    roc_auc = auc(
+        fpr,
+        tpr
+    )
+
+    print(
+        f"\nROC-AUC: {roc_auc:.4f}"
+    )
+
+    plt.figure()
+
+    plt.plot(
+        fpr,
+        tpr,
+        label=f"AUC = {roc_auc:.4f}"
+    )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        "--"
+    )
+
+    plt.xlabel(
+        "False Positive Rate"
+    )
+
+    plt.ylabel(
+        "True Positive Rate"
+    )
+
+    plt.title(
+        "ROC Curve"
+    )
+
+    plt.legend()
+
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join(
+            LOG_DIR,
+            "roc_curve.png"
+        )
+    )
+
+    plt.close()
+
+except Exception as e:
+
+    print(
+        "\nROC curve warning:"
+    )
+
+    print(e)
+
 
 # =========================================================
 # FINAL SUMMARY
 # =========================================================
-print("\n" + "=" * 60)
 
-print("LIVE DIGITAL TWIN SUMMARY")
+print(
+    "\n" + "=" * 60
+)
 
-print("=" * 60)
+print(
+    "LIVE DIGITAL TWIN SUMMARY"
+)
 
-print(f"Samples Processed : {len(X)}")
+print(
+    "=" * 60
+)
 
 high_risk_count = sum(
     1
@@ -365,15 +862,20 @@ high_risk_count = sum(
 )
 
 print(
-    f"High Risk Nodes : "
-    f"{high_risk_count}"
+    f"Samples Processed : {len(X)}"
 )
 
-print(f"Window Size       : {WINDOW_SIZE}")
+print(
+    f"High Risk Nodes   : {high_risk_count}"
+)
 
 print(
-    f"Threshold Updates : "
-    f"Every {THRESHOLD_UPDATE_INTERVAL} samples"
+    f"Window Size       : {WINDOW_SIZE}"
+)
+
+print(
+    f"Threshold Updates : Every "
+    f"{THRESHOLD_UPDATE_INTERVAL} samples"
 )
 
 print(
@@ -381,25 +883,58 @@ print(
     f"{dynamic_threshold:.6f}"
 )
 
+try:
+
+    print(
+        f"Isolated Nodes    : "
+        f"{get_isolated_nodes()}"
+    )
+
+except Exception:
+
+    pass
+
+
 print(
-    f"Isolated Nodes    : "
-    f"{get_isolated_nodes()}"
+    "=" * 60
 )
 
-print("=" * 60)
 
 # =========================================================
-# DISPLAY NETWORK GRAPH
+# DRAW NETWORK
 # =========================================================
-draw_network(
-    G,
-    node_status=node_status,
-    anomaly_nodes=get_isolated_nodes()
+
+if G is not None:
+
+    try:
+
+        draw_network(
+            G,
+            node_status=node_status,
+            anomaly_nodes=get_isolated_nodes()
+        )
+
+    except Exception as e:
+
+        print(
+            "\nNetwork visualization warning:"
+        )
+
+        print(e)
+
+
+# =========================================================
+# FINAL STATUS
+# =========================================================
+
+print(
+    "\nFinal Node Status:\n"
 )
 
-# =========================================================
-# FINAL NODE STATUS
-# =========================================================
-print("\nFinal Node Status:\n")
+print(
+    status_df
+)
 
-print(status_df)
+print(
+    "\nLive detection completed successfully."
+)
